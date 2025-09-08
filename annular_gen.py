@@ -1,5 +1,7 @@
 # annular_sudoku_all_layers_no_highlight.py
 import argparse, math, os, random
+from concurrent.futures import ProcessPoolExecutor
+from itertools import repeat
 from copy import deepcopy
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -159,11 +161,26 @@ def save_puzzle_and_solution(puz, sol, idx, out_dir, pdf, font_size=10, dpi=180)
     fig.savefig(png_s, bbox_inches='tight', dpi=dpi); pdf.savefig(fig, bbox_inches='tight'); plt.close(fig)
     return png_p, png_s
 
+def _build_one_puzzle(idx: int, seed: int, givens: int):
+    """Worker: build one (puzzle, solution) pair.
+
+    Returns (idx, puzzle, solution). Runs in a separate process for speed.
+    """
+    # Build local constraints to avoid cross-process state issues
+    box_map, _, _ = build_box_map_all_layers()
+    # Unique seeds per phase to ensure determinism without cross-talk
+    full = generate_full_grid(seed=seed + idx, box_map=box_map)
+    puz = dig_holes_unique(full, target_givens=givens, max_attempts=4000,
+                           seed=(seed + 100 * idx), box_map=box_map)
+    return idx, puz, full
+
 def main():
     parser = argparse.ArgumentParser(description="Annular Sudoku - all layers & sectors enforced (no highlight)")
     parser.add_argument('--count', type=int, default=10, help='number of puzzles')
     parser.add_argument('--givens', type=int, default=35, help='givens per puzzle')
     parser.add_argument('--seed', type=int, default=2025, help='random seed')
+    parser.add_argument('--workers', type=int, default=None,
+                        help='number of parallel workers (processes), default: CPU count')
     parser.add_argument('--out', type=str, default='annular_out', help='output dir')
     args = parser.parse_args()
 
@@ -171,14 +188,17 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     pdf_path = os.path.join(args.out, 'annular_bundle.pdf')
 
-    box_map, sectors, layers_ranges = build_box_map_all_layers()
-
+    workers = args.workers or (os.cpu_count() or 1)
     with PdfPages(pdf_path) as pdf:
-        for i in range(1, args.count+1):
-            full = generate_full_grid(seed=args.seed + i, box_map=box_map)
-            puz = dig_holes_unique(full, target_givens=args.givens, max_attempts=4000,
-                                   seed=(args.seed+100*i), box_map=box_map)
-            save_puzzle_and_solution(puz, full, i, args.out, pdf, font_size=10, dpi=300)
+        indices = list(range(1, args.count + 1))
+        if workers <= 1 or args.count == 1:
+            for i in indices:
+                _, puz, full = _build_one_puzzle(i, args.seed, args.givens)
+                save_puzzle_and_solution(puz, full, i, args.out, pdf, font_size=10, dpi=300)
+        else:
+            with ProcessPoolExecutor(max_workers=workers) as ex:
+                for (i, puz, full) in ex.map(_build_one_puzzle, indices, repeat(args.seed), repeat(args.givens)):
+                    save_puzzle_and_solution(puz, full, i, args.out, pdf, font_size=10, dpi=300)
     print("Done. out:", os.path.abspath(args.out))
 
 if __name__ == '__main__':
